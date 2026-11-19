@@ -24,7 +24,7 @@
 //
 //   mkdir -p out && MAKEFUN_BOT_DIR=. MAKEFUN_OUTPUT_DIR=out node main.ts
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 const repoDir = process.env.MAKEFUN_BOT_DIR ?? '/bot';
@@ -63,6 +63,18 @@ function postAddress(): string {
   if (typeof url !== 'string' || !POST_ADDRESS.test(url)) {
     die('POST.json "url" must be a post address: https://x.com/<handle>/status/<id>');
   }
+  // The pattern above already pins the shape; this second, explicit pass
+  // pins the host itself, so a future loosening of the pattern can never
+  // quietly let a look-alike domain through.
+  let host: string;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    die(`POST.json "url" is not a parseable URL: ${url}`);
+  }
+  if (!/^(www\.|mobile\.)?(x\.com|twitter\.com)$/.test(host)) {
+    die(`POST.json "url" host must be x.com or twitter.com, got "${host}"`);
+  }
   return url;
 }
 
@@ -80,27 +92,37 @@ function shoutIfPlaceholder(url: string): void {
   }
 }
 
-// Copy one file of the package into the output directory. Returns true
-// when the file was staged. A required file that is absent is fatal; an
-// optional one is simply skipped.
-function stageOne(name: string, required: boolean): boolean {
+// Copy one file of the package into the output directory. Returns the
+// staged file's size in bytes, or null when an optional file is absent.
+// A required file that is absent is fatal; so is a present file smaller
+// than minBytes — a truncated or placeholder stub is worse than none.
+function stageOne(name: string, required: boolean, minBytes = 0): number | null {
   const source = join(repoDir, name);
   if (!existsSync(source)) {
     if (required) die(`required file ${name} is missing from ${repoDir}`);
-    return false;
+    return null;
+  }
+  const size = statSync(source).size;
+  if (size < minBytes) {
+    die(`${name} is only ${size} bytes (minimum ${minBytes}): refusing to stage a stub`);
   }
   copyFileSync(source, join(packageDir, name));
-  return true;
+  return size;
 }
 
 function build(): void {
   const url = postAddress();
   shoutIfPlaceholder(url);
   mkdirSync(packageDir, { recursive: true });
-  stageOne('POST.json', true);
-  const staged: string[] = ['POST.json'];
-  if (stageOne('caption.txt', false)) staged.push('caption.txt');
-  if (stageOne('meme.webp', false)) staged.push('meme.webp');
+  const staged: string[] = [];
+  const note = (name: string, size: number | null): void => {
+    if (size !== null) staged.push(`${name} (${size} bytes)`);
+  };
+  note('POST.json', stageOne('POST.json', true));
+  note('caption.txt', stageOne('caption.txt', false));
+  // The meme is the entry's picture: when it is there it must be a real
+  // image, not a stub — anything under a kilobyte cannot be one.
+  note('meme.webp', stageOne('meme.webp', false, 1000));
   console.log(`gta6-meme-x-01-sol1: staged ${staged.join(', ')} -> ${packageDir}`);
 }
 
